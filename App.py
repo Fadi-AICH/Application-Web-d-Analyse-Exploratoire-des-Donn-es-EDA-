@@ -5,7 +5,7 @@ import plotly.graph_objects as go
 import feedparser
 import yfinance as yf
 import requests
-from datetime import datetime
+from datetime import datetime, time
 import re
 
 # =================================================
@@ -28,6 +28,16 @@ st.markdown("""
         border: 1px solid #30363d;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
+    .bias-badge {
+        padding: 10px 25px; 
+        border-radius: 10px; 
+        font-weight: bold; 
+        font-size: 1.5rem;
+        display: inline-block; 
+        margin-bottom: 20px; 
+        border: 1px solid #30363d;
+        color: white;
+    }
     .news-card {
         padding: 15px;
         border-bottom: 1px solid #30363d;
@@ -37,7 +47,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # =================================================
-# ADVANCED NEWS ENGINE
+# ADVANCED UTILITIES & ENGINES
 # =================================================
 def get_browser_session():
     session = requests.Session()
@@ -55,28 +65,42 @@ def extract_image(entry):
     if img_match: return img_match.group(1)
     return "https://via.placeholder.com/400x250?text=Market+News"
 
-@st.cache_data(ttl=900)
-def fetch_market_news(market_type):
-    # Multiple sources to ensure Forex news is never empty
-    sources = {
-        "Forex": ["https://www.investing.com/rss/news_1.rss", "https://www.dailyfx.com/feeds/forex-news"],
-        "Crypto": ["https://feeds.feedburner.com/CoinDesk"]
-    }
+def get_market_bias(price, sma50, rsi):
+    """4️⃣ Market Bias Engine"""
+    if rsi > 60 and price > sma50:
+        return "🟢 BULLISH", "#238636"
+    elif rsi < 40 and price < sma50:
+        return "🔴 BEARISH", "#da3633"
+    return "🟡 NEUTRAL", "#8b949e"
+
+def score_macro_news(entries):
+    """5️⃣ News -> Signal Link"""
+    macro_keywords = {'rate': 2, 'inflation': 2, 'fed': 3, 'boj': 3, 'sec': 2, 'etf': 1, 'cpi': 2}
+    bullish_words = ['rise', 'growth', 'gain', 'surge', 'optimism']
+    bearish_words = ['fall', 'drop', 'crash', 'fear', 'risk', 'recession']
     
-    session = get_browser_session()
-    all_entries = []
+    score = 0
+    for e in entries:
+        t = e.title.lower()
+        for kw, weight in macro_keywords.items():
+            if kw in t:
+                if any(b in t for b in bullish_words): score += weight
+                if any(b in t for b in bearish_words): score -= weight
     
-    for url in sources.get(market_type, []):
-        try:
-            response = session.get(url, timeout=10)
-            feed = feedparser.parse(response.content)
-            all_entries.extend(feed.entries)
-        except: continue
-        
-    return all_entries[:12]
+    if score > 2: return "Risk-On / Macro Positive", "🟢"
+    if score < -2: return "Risk-Off / Macro Pressure", "🔴"
+    return "Macro Neutral", "⚪"
+
+def get_trading_session():
+    """6️⃣ Session Awareness"""
+    now_utc = datetime.utcnow().time()
+    if time(8,0) <= now_utc <= time(16,0): return "London 🇬🇧 (Active)"
+    if time(13,0) <= now_utc <= time(21,0): return "New York 🇺🇸 (Active)"
+    if time(0,0) <= now_utc <= time(9,0): return "Asia (Tokyo) 🇯🇵 (Active)"
+    return "Quiet Hours 🌙"
 
 # =================================================
-# DATA & INDICATORS
+# DATA FETCHING
 # =================================================
 def calculate_rsi(data, window=14):
     delta = data.diff()
@@ -91,12 +115,27 @@ def get_market_data(symbol, period):
         df = yf.download(symbol, period=period, interval="1d", progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        
         df['SMA20'] = df['Close'].rolling(window=20).mean()
         df['SMA50'] = df['Close'].rolling(window=50).mean()
         df['RSI'] = calculate_rsi(df['Close'])
         return df.reset_index()
     except: return None
+
+@st.cache_data(ttl=900)
+def fetch_market_news(market_type):
+    sources = {
+        "Forex": ["https://www.investing.com/rss/news_1.rss", "https://www.dailyfx.com/feeds/forex-news"],
+        "Crypto": ["https://feeds.feedburner.com/CoinDesk"]
+    }
+    session = get_browser_session()
+    all_entries = []
+    for url in sources.get(market_type, []):
+        try:
+            response = session.get(url, timeout=10)
+            feed = feedparser.parse(response.content)
+            all_entries.extend(feed.entries)
+        except: continue
+    return all_entries[:12]
 
 # =================================================
 # UI LAYOUT
@@ -116,63 +155,66 @@ else:
     asset = st.sidebar.selectbox("Asset", ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD"])
     symbol = asset
 
-# Fetch Data
 data = get_market_data(symbol, tf)
+news_entries = fetch_market_news(market_choice)
 
 if data is not None and len(data) > 0:
-    # --- FIX: Safe check for metrics ---
     cur = data['Close'].iloc[-1]
+    last_rsi = data['RSI'].iloc[-1] if not pd.isna(data['RSI'].iloc[-1]) else 50
+    last_sma50 = data['SMA50'].iloc[-1]
     
-    # Check if we have at least 2 rows to calculate 'prev' and 'diff'
+    # Logic for Bias & Macro
+    bias_text, bias_color = get_market_bias(cur, last_sma50, last_rsi)
+    macro_label, macro_icon = score_macro_news(news_entries)
+    
+    # Top Row: Bias & Session
+    row0_1, row0_2 = st.columns([1, 1])
+    with row0_1:
+        st.markdown(f'<div class="bias-badge" style="background:{bias_color}">{bias_text}</div>', unsafe_allow_html=True)
+    with row0_2:
+        st.info(f"🕒 **Session:** {get_trading_session()} | {macro_icon} **Macro:** {macro_label}")
+
+    # Metrics
     if len(data) >= 2:
         prev = data['Close'].iloc[-2]
         diff = cur - prev
         pct = (diff / prev) * 100
     else:
-        prev = cur
-        diff = 0
-        pct = 0
+        diff = pct = 0
     
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Live Price", f"{cur:,.4f}" if market_choice == "Forex" else f"${cur:,.2f}", f"{diff:.4f}")
     m2.metric("Daily Change", f"{pct:.2f}%")
-    
-    # Safe RSI check
-    last_rsi = data['RSI'].iloc[-1] if not pd.isna(data['RSI'].iloc[-1]) else 50
     m3.metric("RSI (14)", f"{last_rsi:.1f}")
-    
-    # Safe SMA check
-    last_sma = data['SMA20'].iloc[-1]
-    sma_gap = ((cur/last_sma)-1)*100 if not pd.isna(last_sma) else 0
+    last_sma20 = data['SMA20'].iloc[-1]
+    sma_gap = ((cur/last_sma20)-1)*100 if not pd.isna(last_sma20) else 0
     m4.metric("SMA 20 Gap", f"{sma_gap:.2f}%")
 
-    # Main Candlestick Chart
+    # Main Chart
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=data['Date'], open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'], name='Price'))
     fig.add_trace(go.Scatter(x=data['Date'], y=data['SMA20'], name='SMA 20', line=dict(color='#ff9900', width=1.5)))
     fig.add_trace(go.Scatter(x=data['Date'], y=data['SMA50'], name='SMA 50', line=dict(color='#00d4ff', width=1.5)))
+    
+    # Session Bands (Simplified Overlay)
     fig.update_layout(template="plotly_dark", height=500, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-    # Secondary Charts
+    # Sub Charts
     col_a, col_b = st.columns(2)
     with col_a:
-        fig_rsi = px.line(data, x='Date', y='RSI', title="Relative Strength Index")
+        fig_rsi = px.line(data, x='Date', y='RSI', title="Relative Strength Index", template="plotly_dark")
         fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
         fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
-        fig_rsi.update_layout(template="plotly_dark", height=300)
         st.plotly_chart(fig_rsi, use_container_width=True)
     with col_b:
-        fig_vol = px.bar(data, x='Date', y='Volume' if market_choice == "Crypto" else 'Close', title="Activity/Volume")
-        fig_vol.update_layout(template="plotly_dark", height=300)
+        fig_vol = px.bar(data, x='Date', y='Volume' if market_choice == "Crypto" else 'Close', title="Activity/Volume", template="plotly_dark")
         st.plotly_chart(fig_vol, use_container_width=True)
 else:
-    st.error("No data available for this selection. Try a different timeframe.")
+    st.error("No data available. Try a different timeframe.")
 
 # News Section
 st.header(f"📰 Latest {market_choice} Headlines")
-news_entries = fetch_market_news(market_choice)
-
 if not news_entries:
     st.info("🔄 Connecting to news servers...")
 else:
